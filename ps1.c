@@ -1,81 +1,95 @@
 #include <stdio.h>
 #include <stdlib.h>
-#include <dirent.h>
 #include <string.h>
+#include <dirent.h>
 #include <ctype.h>
 #include <unistd.h>
+#include <time.h>
 
-// Function to check if a string is numeric (used for PID checking)
+// Function to check if a string is numeric
 int is_numeric(const char *str) {
-    for (int i = 0; str[i] != '\0'; i++) {
-        if (!isdigit(str[i])) {
+    while (*str) {
+        if (!isdigit(*str)) {
             return 0;
         }
+        str++;
     }
     return 1;
 }
 
-// Function to display the process details for a given PID
+// Function to get the TTY (terminal) associated with the process
+void get_tty(const char *pid, char *tty) {
+    char path[256];
+    snprintf(path, sizeof(path), "/proc/%s/fd/0", pid);
+
+    if (access(path, F_OK) != -1) {
+        snprintf(tty, 32, "tty%s", pid); // For simplicity, using "tty" + pid as a placeholder
+    } else {
+        strcpy(tty, "?");
+    }
+}
+
+// Function to calculate total CPU time (user + system) in the format mm:ss
+void get_cpu_time(const char *pid, char *time_str) {
+    char path[256], buffer[256];
+    unsigned long utime, stime;
+    FILE *file;
+
+    snprintf(path, sizeof(path), "/proc/%s/stat", pid);
+    if ((file = fopen(path, "r")) != NULL) {
+        fscanf(file, "%*d %*s %*c %*d %*d %*d %*d %*d %*u %*u %*u %*u %*u %*u %lu %lu", &utime, &stime);
+        fclose(file);
+    } else {
+        strcpy(time_str, "00:00");
+        return;
+    }
+
+    unsigned long total_time = (utime + stime) / sysconf(_SC_CLK_TCK);  // Convert to seconds
+    snprintf(time_str, 16, "%02lu:%02lu", total_time / 60, total_time % 60);
+}
+
+// Function to display process information in the desired format
 void display_process_info(const char *pid) {
-    char path[40], line[100], *p;
-    FILE *statusf;
-    
-    // Construct the path to the process's status file
-    snprintf(path, 40, "/proc/%s/stat", pid);
-    
-    statusf = fopen(path, "r");
-    if (!statusf) {
-        return;
+    char path[256], cmd[256], tty[32], time_str[16];
+    FILE *file;
+
+    // Construct the path to the process status file
+    snprintf(path, sizeof(path), "/proc/%s/stat", pid);
+
+    // Open the file to read process information
+    if ((file = fopen(path, "r")) != NULL) {
+        fscanf(file, "%*d %255s", cmd);  // Read command name
+        cmd[strlen(cmd) - 1] = '\0'; // Remove the trailing parenthesis
+        memmove(cmd, cmd + 1, strlen(cmd)); // Remove the leading parenthesis
+        fclose(file);
+    } else {
+        strcpy(cmd, "?");
     }
-    
-    // Read the file contents and print process details
-    if (fgets(line, 100, statusf)) {
-        // Process ID, name, and state are the first three fields
-        int pid;
-        char comm[256], state;
-        sscanf(line, "%d %s %c", &pid, comm, &state);
-        printf("%5d %s %c\n", pid, comm, state);
-    }
-    
-    fclose(statusf);
+
+    get_tty(pid, tty);  // Get TTY information
+    get_cpu_time(pid, time_str);  // Get CPU time information
+
+    printf("%5s %10s %8s %s\n", pid, tty, time_str, cmd);  // Print PID, TTY, TIME, CMD
 }
 
-// Function to implement ps -e
-void ps_e() {
-    struct dirent *entry;
-    DIR *dir = opendir("/proc");
-    
-    if (!dir) {
-        perror("opendir");
-        return;
-    }
-    
-    printf("%5s %20s %s\n", "PID", "COMMAND", "STATE");
-    
-    while ((entry = readdir(dir)) != NULL) {
-        if (is_numeric(entry->d_name)) {
-            display_process_info(entry->d_name);
-        }
-    }
-    
-    closedir(dir);
-}
-
-// Function to implement ps -a
+// Function to implement `ps -a` behavior
 void ps_a() {
+    DIR *dir;
     struct dirent *entry;
-    DIR *dir = opendir("/proc");
-    
-    if (!dir) {
+
+    // Open the /proc directory
+    if ((dir = opendir("/proc")) == NULL) {
         perror("opendir");
         return;
     }
-    
-    printf("%5s %20s %s\n", "PID", "COMMAND", "STATE");
-    
+
+    printf("%5s %10s %8s %s\n", "PID", "TTY", "TIME", "CMD");
+
+    // Read each entry in the /proc directory
     while ((entry = readdir(dir)) != NULL) {
+        // Check if the entry name is numeric (indicating a process)
         if (is_numeric(entry->d_name)) {
-            // Only display processes associated with a terminal
+            // Check if the process is associated with a terminal
             char tty_path[256];
             snprintf(tty_path, sizeof(tty_path), "/proc/%s/fd/0", entry->d_name);
             if (access(tty_path, F_OK) != -1) {
@@ -83,7 +97,31 @@ void ps_a() {
             }
         }
     }
-    
+
+    closedir(dir);
+}
+
+// Function to implement `ps -e` behavior
+void ps_e() {
+    DIR *dir;
+    struct dirent *entry;
+
+    // Open the /proc directory
+    if ((dir = opendir("/proc")) == NULL) {
+        perror("opendir");
+        return;
+    }
+
+    printf("%5s %10s %8s %s\n", "PID", "TTY", "TIME", "CMD");
+
+    // Read each entry in the /proc directory
+    while ((entry = readdir(dir)) != NULL) {
+        // Check if the entry name is numeric (indicating a process)
+        if (is_numeric(entry->d_name)) {
+            display_process_info(entry->d_name);
+        }
+    }
+
     closedir(dir);
 }
 
@@ -93,6 +131,7 @@ int main(int argc, char *argv[]) {
         return 1;
     }
 
+    // Handle command-line arguments
     if (strcmp(argv[1], "-a") == 0) {
         ps_a();
     } else if (strcmp(argv[1], "-e") == 0) {
